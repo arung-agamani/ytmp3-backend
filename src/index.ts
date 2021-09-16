@@ -5,11 +5,17 @@ import fs from "fs";
 import os from "os";
 import cors from "cors";
 import crypto from "crypto";
+import stream from "stream";
+import ffmpeg from "fluent-ffmpeg";
 import { Server } from "socket.io";
 import ytdl from "ytdl-core";
+import { config } from "dotenv";
 
 import ytdlMap from "./ytdl";
 import { IRequestLinkEventData } from "./interfaces/Request";
+import { main } from "./db";
+import userModel from "./db/users";
+import { exit } from "process";
 
 // Initialize local directory for downloading
 let baseDownloadPath = "";
@@ -29,150 +35,226 @@ if (os.platform() === "linux") {
 
 const PORT = 5000;
 
-const app = express();
-
-app.use(express());
-app.use(cors());
-
-app.get("/", (req: Request, res: Response) => {
-  res.json({
-    message: "awii",
+(async () => {
+  config({
+    path: path.resolve(__dirname, "..", ".env"),
   });
-});
-
-app.get("/download/:code", (req: Request, res: Response) => {
-  const { code } = req.params;
-  if (!code) {
-    return res.status(404).send("No relevant code");
+  const dbConn = await main();
+  if (dbConn === undefined) {
+    console.error("Cannot connect to database. Exiting...");
+    exit();
   }
-  try {
-    if (
-      fs.existsSync(path.resolve(baseDownloadPath, `${code}.mp4`)) &&
-      downloadFileNameMap.has(code)
-    ) {
-      const filenameSent = downloadFileNameMap.get(code) || "(unset)";
-      return res.download(
-        path.resolve(baseDownloadPath, `${code}.mp4`),
-        `${filenameSent}.mp4`
-      );
-    } else {
-      return res.status(404).send("Resource not found");
-    }
-  } catch (error) {
-    return res.status(500).send("Internal Server Error");
-  }
-});
+  const app = express();
 
-const server = http.createServer(app);
+  app.use(express());
+  app.use(cors());
 
-const io = new Server(server, {
-  cors: {
-    origin: "*",
-  },
-});
-
-const socketIdMap = new Map<string, string>();
-const downloadFileNameMap = new Map<string, string>();
-
-io.on("connection", (socket) => {
-  // handle user initialization
-  if (socket.handshake.headers.clientid !== "") {
-    console.log(
-      "A non-new user connected with id " + socket.handshake.headers.clientid
-    );
-    socketIdMap.set(socket.id, socket.handshake.headers.clientid as string);
-    // load the history then send to user
-  } else {
-    const id = crypto.randomBytes(32).toString("hex");
-    console.log("A new user connected. Giving id " + id);
-    socket.emit("handshake_id", {
-      clientId: id,
+  app.get("/", (req: Request, res: Response) => {
+    res.json({
+      message: "awii",
     });
-    socketIdMap.set(socket.id, id);
-  }
+  });
 
-  // handle request for download
-  socket.on("request_link", async (data: IRequestLinkEventData) => {
-    console.log(data);
-    if (data.link) {
-      socket.emit("request_link_accepted", {
-        message: "Request accepted",
-      });
-      try {
-        const info = await ytdl.getInfo(data.link);
-        socket.emit("request_link_accepted", {
-          message: "URL Metadata Fetched",
-        });
-        console.log(info);
-        const randomFileName = crypto.randomBytes(8).toString("hex");
-        const fileWriteStream = fs.createWriteStream(
-          path.resolve(baseDownloadPath, `${randomFileName}.mp4`)
+  app.get("/download/:code", (req: Request, res: Response) => {
+    const { code } = req.params;
+    if (!code) {
+      return res.status(404).send("No relevant code");
+    }
+    try {
+      if (
+        fs.existsSync(path.resolve(baseDownloadPath, `${code}.mp3`)) &&
+        downloadFileNameMap.has(code)
+      ) {
+        const filenameSent = downloadFileNameMap.get(code) || "(unset)";
+        return res.download(
+          path.resolve(baseDownloadPath, `${code}.mp3`),
+          `${filenameSent}.mp3`
         );
+      } else {
+        return res.status(404).send("Resource not found");
+      }
+    } catch (error) {
+      return res.status(500).send("Internal Server Error");
+    }
+  });
 
-        fileWriteStream.on("finish", () => {
-          console.log("Download finish");
-          socket.emit("request_download_finish", {
-            message: "Download finished for this link " + data.link,
-            title: info.videoDetails.title,
-            length: info.videoDetails.lengthSeconds,
-            link: data.link,
-            downloadId: randomFileName,
+  const server = http.createServer(app);
+
+  const io = new Server(server, {
+    path: "/ws",
+    cors: {
+      origin: "*",
+    },
+  });
+
+  const socketIdMap = new Map<string, string>();
+  const downloadFileNameMap = new Map<string, string>();
+
+  io.of("/ytdl").on("connection", async (socket) => {
+    // handle user initialization
+    console.log(`IP address: ${socket.request.socket.remoteAddress}`);
+    if (socket.handshake.headers.clientid !== "") {
+      const clientId = socket.handshake.headers.clientid as string;
+      console.log(
+        "A non-new user connected with id " + socket.handshake.headers.clientid
+      );
+      await userModel.findOneAndUpdate(
+        {
+          userId: clientId,
+        },
+        {
+          $setOnInsert: {
+            userId: clientId,
+          },
+        },
+        { upsert: true, new: true, runValidators: true }
+      );
+      socketIdMap.set(socket.id, socket.handshake.headers.clientid as string);
+      // load the history then send to user
+    } else {
+      const id = crypto.randomBytes(32).toString("hex");
+      console.log("A new user connected. Giving id " + id);
+      socket.emit("handshake_id", {
+        clientId: id,
+      });
+      await userModel.findOneAndUpdate(
+        {
+          userId: id,
+        },
+        {
+          $setOnInsert: {
+            userId: id,
+          },
+        },
+        { upsert: true, new: true, runValidators: true }
+      );
+      socketIdMap.set(socket.id, id);
+    }
+
+    // handle request for download
+    socket.on("request_link", async (data: IRequestLinkEventData) => {
+      console.log(data);
+      if (data.link && ytdl.validateURL(data.link)) {
+        socket.emit("request_link_accepted", {
+          message: "Request accepted",
+        });
+        try {
+          const info = await ytdl.getInfo(data.link);
+          socket.emit("request_link_accepted", {
+            message: "URL Metadata Fetched",
           });
-          downloadFileNameMap.set(randomFileName, info.videoDetails.title);
-        });
-        const downloadStream = ytdl.downloadFromInfo(info, {
-          quality: "highestaudio",
-        });
-        downloadStream.on("progress", (chunk, current, total) => {
-          socket.emit("request_download_progress", {
-            title: info.videoDetails.title,
-            current,
-            total,
+          // passthrough stream
+          const passStream = new stream.PassThrough();
+          const randomFileName = crypto.randomBytes(8).toString("hex");
+          const fileWriteStream = fs.createWriteStream(
+            path.resolve(baseDownloadPath, `${randomFileName}.mp3`)
+          );
+          const ffmpegCommand = ffmpeg()
+            .format("mp3")
+            .audioCodec("libmp3lame")
+            .on("start", () => {
+              socket.emit("request_convert_start", {
+                downloadId: randomFileName,
+              });
+            })
+            .on("progress", (progress) => {
+              socket.emit("request_convert_progress", {
+                downloadId: randomFileName,
+                progress: progress.percent,
+              });
+            })
+            .on("end", () => {
+              socket.emit("request_convert_finish", {
+                downloadId: randomFileName,
+              });
+            })
+            .output(fileWriteStream);
+          fileWriteStream.on("finish", () => {
+            console.log("Filestream finish");
           });
-        });
-        downloadStream.pipe(fileWriteStream);
-      } catch (error) {
-        console.log(error);
+          const downloadStream = ytdl.downloadFromInfo(info, {
+            filter: "audioonly",
+            quality: "highestaudio",
+          });
+          // handle request accepted and start polling for download progress
+          downloadStream.on("info", (info, format) => {
+            console.log("info event");
+            socket.emit("request_download_info", {
+              downloadId: randomFileName,
+              info,
+              message: "Download finished for this link " + data.link,
+              title: info.videoDetails.title,
+              length: info.videoDetails.lengthSeconds,
+              link: data.link,
+            });
+          });
+          downloadStream.on("progress", (chunk, current, total) => {
+            socket.emit("request_download_progress", {
+              downloadId: randomFileName,
+              title: info.videoDetails.title,
+              current,
+              total,
+            });
+          });
+          downloadStream.on("end", () => {
+            socket.emit("request_download_finish", {
+              message: "Download finished for this link " + data.link,
+              title: info.videoDetails.title,
+              length: info.videoDetails.lengthSeconds,
+              link: data.link,
+              downloadId: randomFileName,
+            });
+            downloadFileNameMap.set(randomFileName, info.videoDetails.title);
+          });
+          downloadStream.pipe(passStream);
+          ffmpegCommand.input(passStream).run();
+        } catch (error) {
+          console.log(error);
+          socket.emit("request_link_rejected", {
+            message: "Error on getting link info",
+          });
+        }
+      } else {
+        // handle rejected response because error
         socket.emit("request_link_rejected", {
-          message: "Error on getting link info",
+          message: "Incorrect link",
         });
       }
-    } else {
-      // handle rejected response because error
-      socket.emit("request_link_rejected", {
-        message: "Incorrect link",
-      });
-    }
+    });
+
+    // handle duplicate link
+
+    // store user history and active downloads in database
+
+    // use cronjobs to periodically clean-up any expired entry
+
+    // handle request accepted and start polling for conversion progress
+
+    // handle rejected response because download error
+
+    // handle rejected response because conversion error
+
+    // handle response send for successful process
+
+    // handle any other error (500)
+
+    // handle user deletes file from server (quota-limit)
+
+    // handle delete success
+
+    // handle delete fail
+
+    // handle user disconnect (closing the app)
+    socket.on("disconnect", () => {
+      console.log(
+        "User with id " + socketIdMap.get(socket.id) + " has disconnected"
+      );
+      // Probably clean-up after this
+    });
   });
 
-  // handle request accepted and start polling for download progress
-
-  // handle request accepted and start polling for conversion progress
-
-  // handle rejected response because download error
-
-  // handle rejected response because conversion error
-
-  // handle response send for successful process
-
-  // handle any other error (500)
-
-  // handle user deletes file from server (quota-limit)
-
-  // handle delete success
-
-  // handle delete fail
-
-  // handle user disconnect (closing the app)
-  socket.on("disconnect", () => {
-    console.log(
-      "User with id " + socketIdMap.get(socket.id) + " has disconnected"
-    );
-    // Probably clean-up after this
+  server.listen(PORT, () => {
+    console.log(`Listening on port ${PORT}`);
+    console.log(`http://localhost:${PORT}`);
   });
-});
-
-server.listen(PORT, () => {
-  console.log(`Listening on port ${PORT}`);
-  console.log(`http://localhost:${PORT}`);
-});
+})();
