@@ -11,7 +11,6 @@ import { Server } from "socket.io";
 import ytdl from "ytdl-core";
 import { config } from "dotenv";
 
-import ytdlMap from "./ytdl";
 import { IRequestLinkEventData } from "./interfaces/Request";
 import { main } from "./db";
 import userModel from "./db/users";
