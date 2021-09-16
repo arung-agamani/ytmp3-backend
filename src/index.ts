@@ -91,6 +91,8 @@ const PORT = process.env.PORT;
   io.of("/ytdl").on("connection", async (socket) => {
     // handle user initialization
     console.log(`IP address: ${socket.request.socket.remoteAddress}`);
+    console.log("Client Request Headers");
+    console.log(socket.request.headers);
     if (socket.handshake.headers.clientid !== "") {
       const clientId = socket.handshake.headers.clientid as string;
       console.log(
