@@ -31,13 +31,12 @@ if (os.platform() === "linux") {
   }
   baseDownloadPath = path.win32.resolve(".", "temp");
 }
-
+config({
+  path: path.resolve(__dirname, "..", ".env"),
+});
 const PORT = process.env.PORT;
 
 (async () => {
-  config({
-    path: path.resolve(__dirname, "..", ".env"),
-  });
   const dbConn = await main();
   if (dbConn === undefined) {
     console.error("Cannot connect to database. Exiting...");
