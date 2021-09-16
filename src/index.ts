@@ -93,6 +93,7 @@ const PORT = process.env.PORT;
     console.log(`IP address: ${socket.request.socket.remoteAddress}`);
     console.log("Client Request Headers");
     console.log(socket.request.headers);
+    const clientIp = (socket.request.headers["x-real-ip"] as string) || "";
     if (socket.handshake.headers.clientid !== "") {
       const clientId = socket.handshake.headers.clientid as string;
       console.log(
@@ -100,11 +101,12 @@ const PORT = process.env.PORT;
       );
       await userModel.findOneAndUpdate(
         {
-          userId: clientId,
+          ipAddress: clientIp,
         },
         {
           $setOnInsert: {
             userId: clientId,
+            ipAddress: clientIp,
           },
         },
         { upsert: true, new: true, runValidators: true }
@@ -117,13 +119,15 @@ const PORT = process.env.PORT;
       socket.emit("handshake_id", {
         clientId: id,
       });
+      // investigate behavior further. also handle search id first
       await userModel.findOneAndUpdate(
         {
-          userId: id,
+          ipAddress: clientIp,
         },
         {
           $setOnInsert: {
             userId: id,
+            ipAddress: clientIp,
           },
         },
         { upsert: true, new: true, runValidators: true }
@@ -134,12 +138,19 @@ const PORT = process.env.PORT;
     // handle request for download
     socket.on("request_link", async (data: IRequestLinkEventData) => {
       console.log(data);
-      if (data.link && ytdl.validateURL(data.link)) {
+      if (!data.link && ytdl.validateURL(data.link))
+        return socket.emit("request_link_rejected", {
+          message: "Invalid link",
+        });
+      const info = await ytdl.getInfo(data.link);
+      if (
+        !info.formats.some((frmt) => frmt.isLive) &&
+        Number(info.videoDetails.lengthSeconds) < 3600
+      ) {
         socket.emit("request_link_accepted", {
           message: "Request accepted",
         });
         try {
-          const info = await ytdl.getInfo(data.link);
           socket.emit("request_link_accepted", {
             message: "URL Metadata Fetched",
           });
@@ -217,7 +228,8 @@ const PORT = process.env.PORT;
       } else {
         // handle rejected response because error
         socket.emit("request_link_rejected", {
-          message: "Incorrect link",
+          message:
+            "Cannot accept live video or your video is more than 3600 seconds (one hour).",
         });
       }
     });
